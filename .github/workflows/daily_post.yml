@@ -1,0 +1,184 @@
+name: Daily science content draft
+
+# 게시(실제 Instagram 업로드)는 본인이 직접 합니다. 이 워크플로는 매일
+# Cell/Nature/Science 본지에서 오늘의 논문 3편(기본값)을 골라 각각의
+# 캐러셀 이미지 + 캡션을 만들고, 각각 별도의 GitHub Issue로 올려둡니다.
+# Instagram Graph API 토큰/앱 심사 절차가 전혀 필요 없습니다.
+
+on:
+  schedule:
+    # 매일 13:00 UTC = 미국 동부시간(EDT, UTC-4) 오전 9시. 필요시 시간 조정.
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+    inputs:
+      post_count:
+        description: "오늘 만들 게시물 편수"
+        required: false
+        default: "3"
+
+permissions:
+  contents: write
+  issues: write
+
+env:
+  POST_COUNT: ${{ github.event.inputs.post_count || '3' }}
+
+jobs:
+  draft-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: 1. Fetch recent papers (Cell/Nature/Science flagship only)
+        env:
+          CROSSREF_MAILTO: ${{ secrets.CROSSREF_MAILTO }}
+        run: |
+          python scripts/fetch_papers.py \
+            --journals cell nature science \
+            --days-back 30 \
+            --mailto "$CROSSREF_MAILTO" \
+            --out output/paper_candidates.json
+
+      - name: 2. Auto-select today's papers (round-robin across journals, see scripts/auto_select.py)
+        run: |
+          python scripts/auto_select.py \
+            --candidates output/paper_candidates.json \
+            --posted-log output/posted_dois.json \
+            --count "$POST_COUNT" \
+            --out output/selected.json
+          cat output/selected.json
+
+      - name: 3-4. Draft + build each selected paper
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
+        run: |
+          python - <<'PYEOF'
+          import json, os, subprocess, sys
+
+          selected = json.load(open("output/selected.json"))
+          if not selected:
+              print("선정된 논문이 없습니다. 워크플로를 종료합니다.", file=sys.stderr)
+              sys.exit(0)
+
+          date_str = subprocess.run(["date", "-u", "+%Y-%m-%d"], capture_output=True, text=True).stdout.strip()
+
+          for i, sel in enumerate(selected, start=1):
+              item_dir = f"output/item_{i}"
+              os.makedirs(item_dir, exist_ok=True)
+
+              journal = sel["container_title"] or sel["searched_journal"]
+              authors = sel["authors"]
+              authors_short = f"{authors[0].split()[-1]}, et al." if authors else "Unknown"
+              reuse_mode = sel["reuse"]["reuse_mode"]
+              pdf_url = sel["reuse"].get("pdf_url") or ""
+              year = (sel["published"] or "2026").split("-")[0]
+              abstract = sel.get("abstract_raw") or "(no abstract available)"
+
+              # 3. draft
+              subprocess.run([
+                  sys.executable, "scripts/draft_conceptual_advance.py",
+                  "--doi", sel["doi"], "--title", sel["title"], "--abstract", abstract,
+                  "--out", f"{item_dir}/analysis.json",
+              ], check=True)
+
+              # 4. build (CC-BY면 자동 스크린샷 포함)
+              build_cmd = [
+                  sys.executable, "run_daily.py", "build",
+                  "--analysis", f"{item_dir}/analysis.json",
+                  "--journal", journal, "--authors-short", authors_short,
+                  "--reuse-mode", reuse_mode, "--out-dir", f"{item_dir}/carousel",
+              ]
+              if reuse_mode == "original_screenshot" and pdf_url:
+                  build_cmd += ["--pdf-url", pdf_url]
+              subprocess.run(build_cmd, check=True)
+
+              subprocess.run([
+                  sys.executable, "scripts/render_caption.py",
+                  "--analysis", f"{item_dir}/analysis.json",
+                  "--journal", journal, "--authors-short", authors_short, "--year", year,
+                  "--out", f"{item_dir}/caption.txt",
+              ], check=True)
+
+              with open(f"{item_dir}/_meta.json", "w") as f:
+                  json.dump({"doi": sel["doi"], "journal": sel["searched_journal"], "date": date_str}, f)
+
+          with open("output/_item_count.txt", "w") as f:
+              f.write(str(len(selected)))
+          PYEOF
+
+      - name: 5. Publish images to GitHub Pages so they're viewable/downloadable
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+          echo "PAGES_DATE=${DATE}" >> "$GITHUB_ENV"
+          git config user.name "science-ig-bot"
+          git config user.email "actions@users.noreply.github.com"
+          N=$(cat output/_item_count.txt 2>/dev/null || echo 0)
+          for i in $(seq 1 "$N"); do
+            mkdir -p "docs/posts/${DATE}/item-${i}"
+            cp "output/item_${i}/carousel"/*.png "docs/posts/${DATE}/item-${i}/" 2>/dev/null || true
+          done
+          git add "docs/posts/${DATE}" || true
+          git commit -m "Add carousel images for ${DATE}" || echo "no changes to commit"
+          git push
+
+      - name: 6. Open one GitHub Issue per selected paper (for you to review and post manually)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          OWNER="${{ github.repository_owner }}"
+          REPO_NAME=$(echo "${{ github.repository }}" | cut -d/ -f2)
+          N=$(cat output/_item_count.txt 2>/dev/null || echo 0)
+          for i in $(seq 1 "$N"); do
+            ITEM_DIR="output/item_${i}"
+            BASE_URL="https://${OWNER}.github.io/${REPO_NAME}/posts/${PAGES_DATE}/item-${i}"
+            DOI=$(python -c "import json;print(json.load(open('${ITEM_DIR}/_meta.json'))['doi'])")
+            JOURNAL=$(python -c "import json;print(json.load(open('${ITEM_DIR}/_meta.json'))['journal'])")
+
+            {
+              echo "## Today's draft post ${i}/${N} ($PAGES_DATE) — ${JOURNAL}"
+              echo ""
+              echo "DOI: $DOI"
+              echo ""
+              for f in $(ls "${ITEM_DIR}/carousel"/*.png 2>/dev/null | sort); do
+                name=$(basename "$f")
+                echo "![${name}](${BASE_URL}/${name})"
+              done
+              if [ -f "${ITEM_DIR}/carousel/MISSING_SLIDE_02_SCREENSHOT.txt" ]; then
+                echo ""
+                echo "**주의:** 슬라이드 2(원본 논문 스크린샷)가 비어 있습니다. \`01_COPYRIGHT_POLICY.md\` 확인 후 직접 채워넣으세요."
+              fi
+              echo ""
+              echo '### Caption'
+              echo '```'
+              cat "${ITEM_DIR}/caption.txt"
+              echo '```'
+              echo ""
+              echo "**게시 방법:** \`templates/review_checklist.md\`로 검수한 뒤, 위 이미지를 다운로드해서 Instagram에 직접 캐러셀로 업로드하고 캡션을 붙여넣으세요."
+            } > "${ITEM_DIR}/issue_body.md"
+
+            gh issue create --title "Draft IG post ${i}/${N} - ${PAGES_DATE} (${JOURNAL})" \
+              --body-file "${ITEM_DIR}/issue_body.md" --label "needs-review"
+          done
+
+      - name: 7. Record today's DOIs as already drafted (avoid repeats later)
+        run: |
+          N=$(cat output/_item_count.txt 2>/dev/null || echo 0)
+          python - <<PYEOF
+          import json, os
+          posted = json.load(open("output/posted_dois.json")) if os.path.exists("output/posted_dois.json") else []
+          for i in range(1, ${N} + 1):
+              meta = json.load(open(f"output/item_{i}/_meta.json"))
+              posted.append(meta["doi"])
+          json.dump(posted, open("output/posted_dois.json", "w"))
+          PYEOF
+          git add output/posted_dois.json
+          git commit -m "Record drafted DOIs for ${PAGES_DATE}" || echo "no changes"
+          git push
