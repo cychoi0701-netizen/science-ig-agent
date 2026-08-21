@@ -133,7 +133,20 @@ jobs:
           git commit -m "Add carousel images for ${DATE}" || echo "no changes to commit"
           git push
 
-      - name: 6. Open one GitHub Issue per selected paper (for you to review and post manually)
+      - name: 6a. Ensure the "needs-review" label exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # gh issue create --label는 라벨이 저장소에 미리 존재해야 하고, 없으면
+          # 바로 실패한다. 새로 만든 저장소에는 기본 라벨(bug, enhancement 등)만
+          # 있고 needs-review는 없으므로, 매번 실행 시 없으면 만들고 있으면
+          # 그대로 두도록(--force는 이미 있어도 에러 없이 덮어씀) 여기서 보장한다.
+          gh label create "needs-review" \
+            --color "FBCA04" \
+            --description "Draft IG post awaiting human review before manual posting" \
+            --force
+
+      - name: 6b. Open one GitHub Issue per selected paper (for you to review and post manually)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
