@@ -58,7 +58,11 @@ jobs:
       - name: 3-4. Draft + build each selected paper
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
+          # vars.ANTHROPIC_MODEL을 저장소 Variables에 별도로 등록하지 않아도
+          # 동작하도록 기본값을 넣어둔다. 다른 모델을 쓰고 싶으면 Settings →
+          # Secrets and variables → Actions → Variables 탭에서
+          # ANTHROPIC_MODEL 값을 등록하면 이 기본값 대신 그 값을 쓴다.
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-sonnet-5' }}
         run: |
           python - <<'PYEOF'
           import json, os, subprocess, sys
