@@ -143,6 +143,7 @@ def main():
 
     output = json.dumps(result, ensure_ascii=False, indent=2)
     if args.out:
+        os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
         with open(args.out, "w", encoding="utf-8") as f:
             f.write(output)
         print(f"저장 완료: {args.out}", file=sys.stderr)
