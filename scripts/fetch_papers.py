@@ -125,10 +125,22 @@ def classify_reuse(doi: str, mailto: str) -> dict:
         return {"is_oa": None, "license": None, "reuse_mode": "unknown", "reason": "DOI 없음"}
 
     url = f"{UNPAYWALL_BASE}/{urllib.parse.quote(doi)}?email={urllib.parse.quote(mailto)}"
-    try:
-        data = http_get_json(url)
-    except Exception as e:  # noqa: BLE001
-        return {"is_oa": None, "license": None, "reuse_mode": "unknown", "reason": f"조회 실패: {e}"}
+    # 일시적인 네트워크 오류/타임아웃으로 인해 실제로는 확인 가능한 논문이
+    # "unknown"으로 잘못 분류되는 것을 줄이기 위해 한 번 재시도한다. 그래도
+    # 실패하면(예: Unpaywall에 해당 DOI가 아예 없는 경우) unknown으로 남기고,
+    # 이후 파이프라인은 unknown을 "라이선스 미확인 = 원본 스크린샷 금지"로
+    # 안전하게 처리한다 (build_carousel.py 참고).
+    last_error = None
+    for attempt in range(2):
+        try:
+            data = http_get_json(url)
+            break
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            if attempt == 0:
+                time.sleep(1.0)
+    else:
+        return {"is_oa": None, "license": None, "reuse_mode": "unknown", "reason": f"조회 실패: {last_error}"}
 
     is_oa = data.get("is_oa")
     best_oa = data.get("best_oa_location") or {}
