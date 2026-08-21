@@ -8,6 +8,7 @@ advance 분석(JSON)으로부터 실제 게시용 캡션 텍스트를 생성한�
 
 import argparse
 import json
+import os
 import re
 
 
@@ -61,6 +62,7 @@ def main():
         journal_tag=to_hashtag(args.journal),
     )
 
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(caption)
 
