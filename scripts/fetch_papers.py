@@ -7,6 +7,10 @@ Cell / Nature / Science 에서 최근 게재된 논문 후보를 수집하고,
 
 데이터 소스:
   - Crossref REST API (무료, 키 불필요) — 논문 메타데이터 검색
+  - OpenAlex API (무료, 이메일만 필요) — Crossref에 초록이 없을 때(특히 Cell/
+    Elsevier 논문에서 흔함) 초록을 보충. 초록을 이 두 곳 모두에서 못 찾으면
+    conceptual advance를 근거 있게 분석할 수 없으므로 해당 논문은 후보에서
+    제외한다.
   - Unpaywall API (무료, 본인 이메일만 필요) — OA 여부 및 라이선스(CC-BY 등) 판정
 
 주의:
@@ -24,6 +28,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -31,6 +36,7 @@ import urllib.request
 
 CROSSREF_BASE = "https://api.crossref.org/works"
 UNPAYWALL_BASE = "https://api.unpaywall.org/v2"
+OPENALEX_BASE = "https://api.openalex.org/works"
 
 # 저널명 텍스트 검색(query.container-title)은 Crossref에서 relevance 기반 fuzzy
 # 매칭이라 "Cell"로 검색하면 "Cell Reports", "Cell Metabolism", "Tissue and Cell"
@@ -50,6 +56,50 @@ def http_get_json(url: str, headers: dict | None = None, timeout: int = 20) -> d
     req = urllib.request.Request(url, headers=headers or {})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def _strip_jats_tags(text: str) -> str:
+    """Crossref abstract 필드는 종종 <jats:p>...</jats:p> 같은 JATS XML 태그를
+    포함한다. LLM 프롬프트에 그대로 넣어도 동작은 하지만, 불필요한 마크업을
+    없애 분석 입력을 깔끔하게 만든다."""
+    return re.sub(r"</?jats:[a-zA-Z]+[^>]*>", " ", text).strip()
+
+
+def _reconstruct_abstract_from_inverted_index(inv_index: dict) -> str:
+    """OpenAlex는 저작권상의 이유로 초록 원문 대신 'inverted index'(단어 ->
+    등장 위치 목록) 형태로만 초록을 제공한다. 위치대로 단어를 다시 배열해
+    원문에 가까운 평문으로 복원한다."""
+    positions: dict[int, str] = {}
+    for word, idxs in inv_index.items():
+        for i in idxs:
+            positions[i] = word
+    if not positions:
+        return ""
+    return " ".join(positions[i] for i in range(max(positions) + 1) if i in positions)
+
+
+def fetch_abstract_from_openalex(doi: str, mailto: str) -> str | None:
+    """Crossref에 초록이 없을 때(특히 Cell/Elsevier 논문에서 흔함 — 실제 API로
+    확인해보니 최근 Cell 논문 대부분이 Crossref에 초록을 아예 등록하지 않는다)
+    OpenAlex에서 초록을 보충한다. OpenAlex는 Crossref/PubMed 등에서 메타데이터를
+    수집하는 무료 공개 학술 데이터베이스로, 별도 API 키 없이 이메일(polite pool)만
+    필요하다. 여기서도 못 찾으면 None을 반환하고, 호출부에서 해당 논문을 후보에서
+    제외한다 — 초록이 전혀 없으면 conceptual advance를 근거 있게 판단할 수 없기
+    때문에, 빈 자리를 "needs verification" 같은 placeholder로 채운 채 그대로
+    후보로 남기지 않는다."""
+    url = f"{OPENALEX_BASE}/doi:{doi}?mailto={urllib.parse.quote(mailto)}"
+    for attempt in range(2):
+        try:
+            data = http_get_json(url, timeout=20)
+            inv_index = data.get("abstract_inverted_index")
+            if not inv_index:
+                return None
+            text = _reconstruct_abstract_from_inverted_index(inv_index)
+            return text or None
+        except Exception:  # noqa: BLE001
+            if attempt == 0:
+                time.sleep(1.0)
+    return None
 
 
 def fetch_recent_from_journal(journal_key: str, days_back: int, rows: int, mailto: str,
@@ -97,9 +147,37 @@ def fetch_recent_from_journal(journal_key: str, days_back: int, rows: int, mailt
         if reference_count < min_references:
             continue  # 뉴스/사설/북리뷰 등 비연구 콘텐츠로 판단, 제외
 
+        doi = item.get("DOI")
+
+        # 초록이 있어야 draft_conceptual_advance.py가 "기존 통념 대비 무엇이
+        # 바뀌었는가"를 근거 있게 판단할 수 있다. Crossref는 초록을 선택적으로만
+        # 제공하는데, 실제 API로 확인해보니 Cell(Elsevier) 논문은 거의 항상 초록이
+        # 빠져 있다 — 반면 OpenAlex는 대부분 논문에서 초록(inverted index 형태)을
+        # 별도로 갖고 있다. 그래서 Crossref에 없으면 OpenAlex로 한 번 더 찾아보고,
+        # 그래도 없으면 이 논문은 애초에 후보에서 제외한다. 초록 없이 억지로 후보에
+        # 남기면 draft_conceptual_advance.py가 모든 항목을 "needs verification in
+        # full text"로 채운 실질적으로 빈 게시물을 만들게 되므로, 이 필터가 "품질"이
+        # 아니라 "이 논문으로 애초에 분석이 가능한가"를 가르는 구조적 조건이다.
+        abstract_raw = item.get("abstract")  # JATS XML 태그 포함, 있을 때만
+        if abstract_raw:
+            abstract_raw = _strip_jats_tags(abstract_raw)
+            abstract_source = "crossref"
+        elif doi:
+            abstract_raw = fetch_abstract_from_openalex(doi, mailto)
+            abstract_source = "openalex" if abstract_raw else None
+        else:
+            abstract_source = None
+
+        if not abstract_raw:
+            print(
+                f"  - skip (초록 없음, Crossref/OpenAlex 모두 실패): {titles[0][:60]}...",
+                file=sys.stderr,
+            )
+            continue
+
         results.append(
             {
-                "doi": item.get("DOI"),
+                "doi": doi,
                 "title": titles[0],
                 "container_title": (item.get("container-title") or [None])[0],
                 "authors": [
@@ -109,7 +187,8 @@ def fetch_recent_from_journal(journal_key: str, days_back: int, rows: int, mailt
                 "published": "-".join(
                     str(x) for x in item.get("published", {}).get("date-parts", [[None]])[0] if x
                 ),
-                "abstract_raw": item.get("abstract"),  # JATS XML 태그 포함, 있을 때만
+                "abstract_raw": abstract_raw,
+                "abstract_source": abstract_source,
                 "reference_count": reference_count,
                 "url": item.get("URL"),
                 "crossref_license": item.get("license", []),
