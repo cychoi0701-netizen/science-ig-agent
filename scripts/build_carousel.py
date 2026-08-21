@@ -177,7 +177,12 @@ def main():
     parser.add_argument("--authors-short", required=True, help='예: "Füchtbauer L, et al."')
     parser.add_argument("--reuse-mode", required=True,
                          choices=["original_screenshot", "original_screenshot_restricted",
-                                  "original_screenshot_check", "custom_graphic"])
+                                  "original_screenshot_check", "custom_graphic", "unknown"],
+                         help="fetch_papers.py의 classify_reuse()가 매기는 값. 'unknown'은 "
+                              "Unpaywall 조회 자체가 실패했거나 DOI가 없어 OA 여부를 전혀 "
+                              "확인하지 못한 경우다 — 라이선스를 확인할 근거가 없으므로 "
+                              "custom_graphic과 동일하게 원본 스크린샷을 시도하지 않는 것이 "
+                              "저작권상 안전한 기본 동작이다 (아래 분기 로직 참고).")
     parser.add_argument("--screenshot-path", default=None,
                          help="fetch_oa_screenshot.py 등으로 미리 렌더링해둔 논문 페이지 PNG 경로. "
                               "제공되면 2번 슬라이드로 바로 끼워넣는다 (CC-BY 케이스에서 완전 자동화 가능). "
@@ -221,6 +226,10 @@ def main():
                     f"라이선스 상태: {args.reuse_mode}"
                 )
     else:
+        # reuse_mode가 custom_graphic이거나 unknown(OA 여부 확인 실패)인 경우 모두
+        # 여기로 온다. 라이선스를 확인하지 못했다면 원본 스크린샷을 쓰지 않는 쪽이
+        # 저작권상 안전하므로, 확인된 OA(original_screenshot 계열)가 아닌 이상
+        # 항상 자체 제작 요약 슬라이드로 대체한다.
         slot2_img = slide_custom_graphic(a["what_this_paper_shows"], args.journal)
 
     named_slides = [
