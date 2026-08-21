@@ -70,18 +70,12 @@ receptor."
 
 
 def call_claude(prompt: str, model: str | None = None) -> dict:
-    # 모델 ID는 시간이 지나며 바뀌므로 하드코딩하지 않는다.
-    # 환경변수로 지정하거나, 없으면 최신 모델 목록을 확인:
-    # https://docs.claude.com/en/docs/about-claude/models
-    model = model or os.environ.get("ANTHROPIC_MODEL")
-    if not model:
-        print(
-            "모델 ID가 지정되지 않았습니다. 환경변수 ANTHROPIC_MODEL을 설정하세요 "
-            "(예: export ANTHROPIC_MODEL=claude-sonnet-4-5-20250929). "
-            "최신 모델 ID는 https://docs.claude.com/en/docs/about-claude/models 에서 확인하세요.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    # "claude-sonnet-5"는 특정 스냅샷에 고정된 이름이 아니라 Anthropic이 관리하는
+    # 별칭(alias)이라, 시간이 지나 더 나은 버전이 나와도 이 이름 자체는 계속
+    # 유효하다 (2026-08 기준 공식 문서 확인). 그래서 하드코딩된 기본값으로 써도
+    # 안전하다 — 다만 특정 스냅샷을 고정하고 싶으면 환경변수 ANTHROPIC_MODEL로
+    # 덮어쓸 수 있게 해둔다. 최신 모델 목록은 https://docs.claude.com/en/docs/about-claude/models
+    model = model or os.environ.get("ANTHROPIC_MODEL") or "claude-sonnet-5"
     try:
         import anthropic
     except ImportError:
