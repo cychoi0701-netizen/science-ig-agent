@@ -19,6 +19,7 @@ CC-BY 오픈액세스 논문에 한해서만, 공개 PDF를 내려받아 지정�
 """
 
 import argparse
+import os
 import sys
 
 import fitz  # PyMuPDF
@@ -31,6 +32,7 @@ def download_pdf(url: str, out_path: str) -> None:
     content_type = resp.headers.get("Content-Type", "")
     if "pdf" not in content_type.lower() and not resp.content[:4] == b"%PDF":
         raise ValueError(f"응답이 PDF가 아닙니다 (Content-Type: {content_type}). URL 확인 필요: {url}")
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with open(out_path, "wb") as f:
         f.write(resp.content)
 
@@ -42,6 +44,7 @@ def render_page(pdf_path: str, page_number: int, out_png: str, zoom: float = 2.5
     page = doc[page_number]
     mat = fitz.Matrix(zoom, zoom)
     pix = page.get_pixmap(matrix=mat)
+    os.makedirs(os.path.dirname(out_png) or ".", exist_ok=True)
     pix.save(out_png)
 
 
