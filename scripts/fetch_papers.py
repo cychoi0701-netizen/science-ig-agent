@@ -23,6 +23,7 @@ Cell / Nature / Science 에서 최근 게재된 논문 후보를 수집하고,
 import argparse
 import datetime as dt
 import json
+import os
 import sys
 import time
 import urllib.parse
@@ -193,6 +194,7 @@ def main():
             time.sleep(0.2)  # Unpaywall API에 과도한 부하를 주지 않기 위한 최소한의 딜레이
         all_candidates.extend(candidates)
 
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(all_candidates, f, ensure_ascii=False, indent=2)
 
